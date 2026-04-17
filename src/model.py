@@ -115,6 +115,7 @@ class LubriSet(nn.Module):
         n_types: int,
         n_props: int,
         condition_dim: int,
+        global_dim: int = 0,
         d_model: int = 128,
         n_heads: int = 4,
         n_layers: int = 3,
@@ -132,14 +133,24 @@ class LubriSet(nn.Module):
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
         )
+        self.global_dim = global_dim
+        if global_dim > 0:
+            self.global_mlp = nn.Sequential(
+                nn.Linear(global_dim, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
         self.layers = nn.ModuleList(
             [SAB(d_model, n_heads, dropout) for _ in range(n_layers)]
         )
         # One seed per target.
         self.pma = PMA(d_model, n_heads, k=n_targets, dropout=dropout)
+        # Head receives pooled vector + raw global features concatenated.
+        head_in = d_model + global_dim
         self.heads = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(d_model, d_model),
+                nn.Linear(head_in, d_model),
                 nn.GELU(),
                 nn.Dropout(dropout),
                 nn.Linear(d_model, 1),
@@ -148,18 +159,28 @@ class LubriSet(nn.Module):
         ])
         self.n_targets = n_targets
 
-    def forward(self, comp_ids, type_ids, props, miss, mass, is_new, conditions, pad_mask):
+    def forward(self, comp_ids, type_ids, props, miss, mass, is_new,
+                conditions, pad_mask, global_feats=None):
         """Returns (B, n_targets) predictions in the transformed space."""
         comp_tokens = self.encoder(comp_ids, type_ids, props, miss, mass, is_new)
         cond_token = self.cond_mlp(conditions).unsqueeze(1)  # (B,1,D)
         # Scale by mass fraction: emphasizes major components.
         comp_tokens = comp_tokens * (1.0 + mass.unsqueeze(-1))
-        x = torch.cat([cond_token, comp_tokens], dim=1)
-        # Extend pad_mask to cover prepended condition token.
-        cond_pad = torch.zeros(pad_mask.size(0), 1, dtype=torch.bool, device=pad_mask.device)
-        full_mask = torch.cat([cond_pad, pad_mask], dim=1)
+        tokens = [cond_token, comp_tokens]
+        prefix_tokens = 1  # cond token
+        if self.global_dim > 0 and global_feats is not None:
+            gtok = self.global_mlp(global_feats).unsqueeze(1)
+            tokens.insert(0, gtok)
+            prefix_tokens = 2
+        x = torch.cat(tokens, dim=1)
+        # Extend pad_mask to cover prepended tokens (never padded).
+        B = pad_mask.size(0)
+        prefix_pad = torch.zeros(B, prefix_tokens, dtype=torch.bool, device=pad_mask.device)
+        full_mask = torch.cat([prefix_pad, pad_mask], dim=1)
         for layer in self.layers:
             x = layer(x, full_mask)
         pooled = self.pma(x, full_mask)  # (B, n_targets, D)
+        if self.global_dim > 0 and global_feats is not None:
+            pooled = torch.cat([pooled, global_feats.unsqueeze(1).expand(-1, self.n_targets, -1)], dim=-1)
         outs = [self.heads[i](pooled[:, i]).squeeze(-1) for i in range(self.n_targets)]
         return torch.stack(outs, dim=-1)

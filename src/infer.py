@@ -29,6 +29,7 @@ def load_model(ckpt_path: str, device: torch.device) -> tuple[LubriSet, dict]:
     model = LubriSet(
         n_components=cfg["n_components"], n_types=cfg["n_types"],
         n_props=cfg["n_props"], condition_dim=cfg["condition_dim"],
+        global_dim=cfg.get("global_dim", 0),
         d_model=cfg["d_model"], n_layers=cfg["n_layers"], n_targets=2,
     )
     model.load_state_dict(ckpt["state_dict"])
@@ -66,20 +67,29 @@ def main():
 
     all_preds = []
     target_mu = target_sd = None
+    global_mu = global_sd = None
     for ck in ckpt_files:
         model, ck_meta = load_model(str(ck), device)
         if target_mu is None:
             target_mu = ck_meta["target_mu"]
             target_sd = ck_meta["target_sd"]
+            global_mu = ck_meta.get("global_mu")
+            global_sd = ck_meta.get("global_sd")
+        g_mu = torch.from_numpy(global_mu).to(device) if global_mu is not None else None
+        g_sd = torch.from_numpy(global_sd).to(device) if global_sd is not None else None
         ds = SetDataset(test_samples)
         dl = DataLoader(ds, batch_size=32, shuffle=False, collate_fn=collate)
         outs, ids = [], []
         with torch.no_grad():
             for batch in dl:
                 batch_t = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                g = None
+                if g_mu is not None:
+                    g = (batch_t["globals"] - g_mu) / g_sd
                 pred = model(
                     batch_t["comp_ids"], batch_t["type_ids"], batch_t["props"], batch_t["miss"],
                     batch_t["mass"], batch_t["is_new"], batch_t["conditions"], batch_t["pad_mask"],
+                    global_feats=g,
                 )
                 outs.append(pred.cpu().numpy())
                 ids.extend(batch_t["scenario_id"])

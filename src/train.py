@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader, Dataset
@@ -22,6 +23,7 @@ from .data import (
     CONDITION_DIM,
     COL_COMP,
     TOP_PROPERTIES,
+    GLOBAL_FEAT_DIM,
     ScenarioSample,
     build_component_property_table,
     build_scenario_samples,
@@ -60,6 +62,7 @@ class SetDataset(Dataset):
             "mass": s.mass,
             "is_new": s.is_new,
             "conditions": s.conditions,
+            "globals": s.globals,
         }
         if s.targets is not None:
             y_t = target_transform(s.targets[None, :])[0]
@@ -83,6 +86,7 @@ def collate(batch, pad_n=None):
     mass = np.zeros((B, max_n), dtype=np.float32)
     is_new = np.zeros((B, max_n), dtype=np.float32)
     conditions = np.zeros((B, batch[0]["conditions"].shape[0]), dtype=np.float32)
+    globals_ = np.zeros((B, batch[0]["globals"].shape[0]), dtype=np.float32)
     pad_mask = np.ones((B, max_n), dtype=bool)  # True = pad
     has_target = "target" in batch[0]
     if has_target:
@@ -98,6 +102,7 @@ def collate(batch, pad_n=None):
         mass[i, :n] = b["mass"]
         is_new[i, :n] = b["is_new"]
         conditions[i] = b["conditions"]
+        globals_[i] = b["globals"]
         pad_mask[i, :n] = False
         scen_ids.append(b["scenario_id"])
         if has_target:
@@ -110,6 +115,7 @@ def collate(batch, pad_n=None):
         "mass": torch.from_numpy(mass),
         "is_new": torch.from_numpy(is_new),
         "conditions": torch.from_numpy(conditions),
+        "globals": torch.from_numpy(globals_),
         "pad_mask": torch.from_numpy(pad_mask),
         "scenario_id": scen_ids,
     }
@@ -148,6 +154,8 @@ def train_fold(
     n_types,
     n_props,
     condition_dim,
+    global_mu,
+    global_sd,
     device,
     target_mu,
     target_sd,
@@ -179,6 +187,7 @@ def train_fold(
         n_types=n_types,
         n_props=n_props,
         condition_dim=condition_dim,
+        global_dim=GLOBAL_FEAT_DIM,
         d_model=d_model,
         n_heads=n_heads,
         n_layers=n_layers,
@@ -186,6 +195,8 @@ def train_fold(
         dropout=dropout,
         id_dropout=id_dropout,
     ).to(device)
+    g_mu = torch.from_numpy(global_mu).to(device)
+    g_sd = torch.from_numpy(global_sd).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -204,9 +215,11 @@ def train_fold(
             batch = component_dropout({k: (v.to(device) if torch.is_tensor(v) else v)
                                        for k, v in batch.items()}, p=comp_dropout)
             y = batch["target"]
+            g = (batch["globals"] - g_mu) / g_sd
             pred = model(
                 batch["comp_ids"], batch["type_ids"], batch["props"], batch["miss"],
                 batch["mass"], batch["is_new"], batch["conditions"], batch["pad_mask"],
+                global_feats=g,
             )
             loss = F.smooth_l1_loss(pred, y)
             opt.zero_grad()
@@ -222,9 +235,11 @@ def train_fold(
         with torch.no_grad():
             for batch in val_loader:
                 batch_t = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                g = (batch_t["globals"] - g_mu) / g_sd
                 pred = model(
                     batch_t["comp_ids"], batch_t["type_ids"], batch_t["props"], batch_t["miss"],
                     batch_t["mass"], batch_t["is_new"], batch_t["conditions"], batch_t["pad_mask"],
+                    global_feats=g,
                 )
                 val_preds.append(pred.cpu().numpy())
                 val_targets.append(batch_t["target"].cpu().numpy())
@@ -248,25 +263,51 @@ def train_fold(
     return model, best_val, history
 
 
-def predict(model, samples, target_mu, target_sd, device, batch_size=32):
+def predict(model, samples, target_mu, target_sd, device,
+            global_mu=None, global_sd=None, batch_size=32, tta: int = 1):
+    """Predict with optional test-time augmentation via random component permutation.
+
+    Since the set is permutation-invariant by design, TTA only helps via dropout
+    variance. Keep default tta=1 for clean single-pass; tta>1 activates MC dropout.
+    """
     ds = SetDataset(samples)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate, drop_last=False)
-    model.eval()
-    outs = []
+    g_mu = torch.from_numpy(global_mu).to(device) if global_mu is not None else None
+    g_sd = torch.from_numpy(global_sd).to(device) if global_sd is not None else None
+
+    all_runs = []
     ids = []
-    with torch.no_grad():
-        for batch in dl:
-            batch_t = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-            pred = model(
-                batch_t["comp_ids"], batch_t["type_ids"], batch_t["props"], batch_t["miss"],
-                batch_t["mass"], batch_t["is_new"], batch_t["conditions"], batch_t["pad_mask"],
-            )
-            outs.append(pred.cpu().numpy())
-            ids.extend(batch_t["scenario_id"])
-    preds = np.concatenate(outs)
+    for run in range(max(1, tta)):
+        # Enable dropout sampling if tta > 1.
+        if tta > 1:
+            model.train()  # enable dropout
+            for m in model.modules():
+                # Keep BN/LN in eval mode.
+                if isinstance(m, (nn.LayerNorm,)):
+                    m.eval()
+        else:
+            model.eval()
+        outs = []
+        ids_run = []
+        with torch.no_grad():
+            for batch in dl:
+                batch_t = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                g = None
+                if g_mu is not None:
+                    g = (batch_t["globals"] - g_mu) / g_sd
+                pred = model(
+                    batch_t["comp_ids"], batch_t["type_ids"], batch_t["props"], batch_t["miss"],
+                    batch_t["mass"], batch_t["is_new"], batch_t["conditions"], batch_t["pad_mask"],
+                    global_feats=g,
+                )
+                outs.append(pred.cpu().numpy())
+                ids_run.extend(batch_t["scenario_id"])
+        all_runs.append(np.concatenate(outs))
+        if not ids:
+            ids = ids_run
+    preds = np.mean(np.stack(all_runs, axis=0), axis=0)
     # Un-standardize (target space).
     preds = preds * target_sd + target_mu
-    # Inverse log1p for viscosity; oxidation is identity.
     preds_raw = target_inverse_transform(preds)
     return ids, preds_raw
 
@@ -311,6 +352,12 @@ def main():
     target_sd = y_t.std(axis=0).astype(np.float32) + 1e-6
     print("Target transformed stats (mean, sd):", target_mu, target_sd)
 
+    # Global feature normalization (fit on train only).
+    G = np.stack([s.globals for s in train_samples_all], axis=0)
+    global_mu = G.mean(axis=0).astype(np.float32)
+    global_sd = (G.std(axis=0) + 1e-6).astype(np.float32)
+    print(f"Global features: dim={G.shape[1]}")
+
     device = torch.device(args.device)
     n_props = len(TOP_PROPERTIES)
     n_components = len(comp_vocab)
@@ -335,7 +382,8 @@ def main():
             model, best_val, hist = train_fold(
                 tr_samples, va_samples,
                 n_components=n_components, n_types=n_types, n_props=n_props,
-                condition_dim=CONDITION_DIM, device=device,
+                condition_dim=CONDITION_DIM,
+                global_mu=global_mu, global_sd=global_sd, device=device,
                 target_mu=target_mu, target_sd=target_sd,
                 epochs=args.epochs, batch_size=args.batch_size,
                 d_model=args.d_model, n_layers=args.n_layers,
@@ -344,13 +392,15 @@ def main():
             print(f"  -> best val_mae (normalized transformed) = {best_val:.4f}")
 
             # OOF predictions (in raw target space).
-            ids_va, preds_va = predict(model, va_samples, target_mu, target_sd, device)
+            ids_va, preds_va = predict(model, va_samples, target_mu, target_sd, device,
+                                       global_mu=global_mu, global_sd=global_sd)
             for i, sid in enumerate(ids_va):
                 j = int(np.where(scenarios == sid)[0][0])
                 oof_preds[j] += preds_va[i]
                 oof_count[j] += 1
             # Test predictions.
-            ids_te, preds_te = predict(model, test_samples, target_mu, target_sd, device)
+            ids_te, preds_te = predict(model, test_samples, target_mu, target_sd, device,
+                                       global_mu=global_mu, global_sd=global_sd)
             test_preds_sum += preds_te
             n_models += 1
 
@@ -358,12 +408,14 @@ def main():
             torch.save(
                 {"state_dict": model.state_dict(),
                  "target_mu": target_mu, "target_sd": target_sd,
+                 "global_mu": global_mu, "global_sd": global_sd,
                  "comp_vocab": comp_vocab, "type_vocab": type_vocab,
                  "mu": mu, "sd": sd,
                  "config": {
                      "d_model": args.d_model, "n_layers": args.n_layers,
                      "n_components": n_components, "n_types": n_types, "n_props": n_props,
                      "condition_dim": CONDITION_DIM,
+                     "global_dim": GLOBAL_FEAT_DIM,
                  }},
                 out_dir / f"model_fold{fold_idx}_seed{seed}.pt",
             )

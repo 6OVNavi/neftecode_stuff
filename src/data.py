@@ -37,7 +37,7 @@ COMPONENT_TYPES = [
     "Антипенная_присадка",
 ]
 
-# Top numeric properties by coverage (picked via EDA, in order of usefulness).
+# Numeric properties with coverage >= 5 components (from EDA).
 TOP_PROPERTIES = [
     "Кинематическая вязкость, при 100°C, ASTM D445",
     "Кинематическая вязкость, при 40°C, ASTM D445",
@@ -56,9 +56,9 @@ TOP_PROPERTIES = [
     "Последовательность 1 | ASTM D892",
     "Последовательность 3 | ASTM D892",
     "Последовательность 2 | ASTM D892",
-    "Деэм.время | ASTM D1401",
     "Деэм.масло | ASTM D1401",
     "Деэм.эмульсия | ASTM D1401",
+    "Деэм.время | ASTM D1401",
     "Деэм.вода | ASTM D1401",
     "Динамическая вязкость CCS -35°C, ASTM D5293",
     "Отношение Мыло/Основание",
@@ -69,7 +69,69 @@ TOP_PROPERTIES = [
     "Щелочное число, ГОСТ 11362",
     "Группа по API",
     "Атомное отношение P:Zn",
+    "Содержание воды, % масс.",
+    "Содержание серы, % масс.",
+    "Плотность при 15°С, ASTM D4052",
+    "Содержание Азота",
+    "Энергия диссоциации связи Х-Н, ккал/моль",
+    "Энергия НСМО, эВ",
+    "Химический потенциал, Дж/моль",
+    "Стерический фактор, Å3",
+    "Масса гидрофобного хвоста, г/моль",
+    "Содержание Бора",
+    "Потенциал ионизации,эВ",
+    "Энергия ВЗМО, эВ",
+    "Индекс полидисперсности",
+    "Кинематическая вязкость",
+    "Дипольный момент, Д",
+    "Активный Азот / Кислород, % масс. (N или O)",
+    "Содержание серы, мг/кг",
+    "Содержание масла",
+    "Плотность при 20°С, ASTM D4052",
+    "Содержание насыщ. у/в",
+    "Температура плавления, °C",
+    "Массовая доля фосфора | ASTM D6481",
+    "Массовая доля цинка | ASTM D6481",
+    "Степень полисульфидности",
+    "Массовая доля кальция | ASTM D6481",
+    "Длина углеродной цепи",
+    "% масс. (Mo)",
+    "COC (°C)",
+    "Массовая доля серы | ASTM D6481",
+    "Кислотное число, ГОСТ 11362",
+    "Цвет | ASTM D1500",
 ]
+
+# Property indices that represent additive concentrations — for physics aggregates.
+# Positions in TOP_PROPERTIES. Used to compute scenario-level sums weighted by mass.
+_IDX = {name: i for i, name in enumerate(TOP_PROPERTIES)}
+PHYS_AGG_SPEC = {
+    "total_P":  [_IDX["Массовая доля фосфора, ASTM D6481"], _IDX["Массовая доля фосфора | ASTM D6481"]],
+    "total_Ca": [_IDX["Массовая доля кальция, ASTM D6481"], _IDX["Массовая доля кальция | ASTM D6481"]],
+    "total_Zn": [_IDX["Массовая доля цинка, ASTM D6481"], _IDX["Массовая доля цинка | ASTM D6481"]],
+    "total_S":  [_IDX["Массовая доля серы, ASTM D6481"], _IDX["Массовая доля серы | ASTM D6481"]],
+    "total_TBN": [_IDX["Щелочное число, ASTM D2896"], _IDX["Щелочное число, ГОСТ 11362"]],
+    "total_N":   [_IDX["Содержание Азота"]],
+    "total_B":   [_IDX["Содержание Бора"]],
+    "total_water": [_IDX["Содержание воды, % масс."]],
+    "total_Mo":   [_IDX["% масс. (Mo)"]],
+    "total_NOACK": [_IDX["Испаряемость по NOACK, ASTM D5800"]],
+    "mean_VI":    [_IDX["Индекс вязкости, ГОСТ 25371"]],
+    "mean_KV100": [_IDX["Кинематическая вязкость, при 100°C, ASTM D445"]],
+    "mean_BDE":   [_IDX["Энергия диссоциации связи Х-Н, ккал/моль"]],
+    "mean_HOMO":  [_IDX["Энергия ВЗМО, эВ"]],
+    "mean_LUMO":  [_IDX["Энергия НСМО, эВ"]],
+    "mean_IP":    [_IDX["Потенциал ионизации,эВ"]],
+    "mean_API_group": [_IDX["Группа по API"]],
+    "mean_steric": [_IDX["Стерический фактор, Å3"]],
+}
+AGG_MODE = {k: ("sum" if k.startswith("total") else "mean") for k in PHYS_AGG_SPEC}
+PHYS_AGG_NAMES = list(PHYS_AGG_SPEC.keys())
+N_PHYS_AGG = len(PHYS_AGG_NAMES)
+# Plus 9 type presence flags + 3 synergy flags.
+N_TYPE_FLAGS = 9
+N_SYNERGY = 3
+GLOBAL_FEAT_DIM = N_PHYS_AGG + N_TYPE_FLAGS + N_SYNERGY
 
 
 def _to_float(x):
@@ -161,7 +223,55 @@ class ScenarioSample:
     mass: np.ndarray           # (n,) raw mass fraction (normalized to sum 1 inside the scenario)
     conditions: np.ndarray     # (C,) condition vector
     is_new: np.ndarray         # (n,) 1 if component not in train vocab
+    globals: np.ndarray        # (GLOBAL_FEAT_DIM,) physics aggregates + type flags + synergy
     targets: np.ndarray | None # (2,) target_viscosity, target_oxidation (train only)
+
+
+def compute_global_features(type_ids: np.ndarray, props_raw: np.ndarray,
+                            miss: np.ndarray, mass: np.ndarray,
+                            type_vocab: dict, component_types: list) -> np.ndarray:
+    """Scenario-level physics aggregates + type presence + synergy flags.
+
+    props_raw: (n, P) RAW (un-standardized) property values with NaN where missing.
+    Returns a GLOBAL_FEAT_DIM-vector.
+    """
+    n = len(mass)
+    # 1) Physics aggregates: for each aggregate, find the first non-NaN source column
+    #    per component and apply mass-weighted sum (or mean) across the scenario.
+    agg_vals = []
+    for name, srcs in PHYS_AGG_SPEC.items():
+        vals = np.full(n, np.nan, dtype=float)
+        for src in srcs:
+            col = props_raw[:, src]
+            vals = np.where(np.isnan(vals), col, vals)
+        weights = mass.copy()
+        valid = ~np.isnan(vals)
+        if not valid.any():
+            agg_vals.append(0.0)
+            continue
+        vv = np.where(valid, vals, 0.0)
+        ww = np.where(valid, weights, 0.0)
+        w_sum = ww.sum()
+        if AGG_MODE[name] == "sum":
+            agg_vals.append(float((vv * ww).sum()))
+        else:
+            agg_vals.append(float((vv * ww).sum() / (w_sum + 1e-9)) if w_sum > 0 else 0.0)
+
+    # 2) Type presence: one float per type = total mass of that type in mixture.
+    type_flags = np.zeros(N_TYPE_FLAGS, dtype=float)
+    for i, tname in enumerate(component_types):
+        idx = type_vocab.get(tname, -1)
+        if idx >= 0:
+            type_flags[i] = float(mass[type_ids == idx].sum())
+
+    # 3) Chemistry-informed synergy flags.
+    has_Mo = 1.0 if type_flags[component_types.index("Соединение_молибдена")] > 0 else 0.0
+    has_ZDDP = 1.0 if type_flags[component_types.index("Противоизносная_присадка")] > 0 else 0.0
+    has_AO = 1.0 if type_flags[component_types.index("Антиоксидант")] > 0 else 0.0
+    synergy = np.array([has_Mo * has_ZDDP, has_Mo * has_AO, has_ZDDP * has_AO], dtype=float)
+
+    out = np.concatenate([np.array(agg_vals, dtype=float), type_flags, synergy])
+    return out.astype(np.float32)
 
 
 def build_condition_vector(temp: float, time: float, biofuel: float, cat: int) -> np.ndarray:
@@ -204,6 +314,7 @@ def build_scenario_samples(
         comp_ids = np.zeros(n, dtype=np.int64)
         type_ids = np.zeros(n, dtype=np.int64)
         props = np.zeros((n, len(TOP_PROPERTIES)), dtype=np.float32)
+        props_raw = np.full((n, len(TOP_PROPERTIES)), np.nan, dtype=np.float32)
         miss = np.ones((n, len(TOP_PROPERTIES)), dtype=np.float32)
         mass = np.zeros(n, dtype=np.float32)
         is_new = np.zeros(n, dtype=np.float32)
@@ -236,6 +347,7 @@ def build_scenario_samples(
             # Clip extreme outliers.
             std = np.clip(std, -5.0, 5.0)
             props[i] = std.astype(np.float32)
+            props_raw[i] = np.where(m_mask, np.nan, vals).astype(np.float32)
             miss[i] = m_mask.astype(np.float32)
 
         # Normalize mass fractions to sum to 1 inside a scenario (anonymized transform).
@@ -256,6 +368,11 @@ def build_scenario_samples(
             y2 = float(first[COL_TARGET_OX])
             targets = np.array([y1, y2], dtype=np.float32)
 
+        globals_vec = compute_global_features(
+            type_ids=type_ids, props_raw=props_raw, miss=miss,
+            mass=mass_norm, type_vocab=type_vocab, component_types=COMPONENT_TYPES,
+        )
+
         samples.append(
             ScenarioSample(
                 scenario_id=str(scen_id),
@@ -266,6 +383,7 @@ def build_scenario_samples(
                 mass=mass_norm.astype(np.float32),
                 conditions=cond.astype(np.float32),
                 is_new=is_new,
+                globals=globals_vec,
                 targets=targets,
             )
         )
@@ -284,17 +402,21 @@ def build_vocabs(mix_train: pd.DataFrame, mix_test: pd.DataFrame) -> tuple[dict,
     return comp_vocab, type_vocab
 
 
+_ASINH_SCALE = 10.0  # scale factor before asinh so small values stay linear-ish
+
+
 def target_transform(y: np.ndarray) -> np.ndarray:
-    """Sign-preserving log1p for viscosity (skew), z-score later for oxidation.
+    """asinh transform for viscosity (symmetric, smooth for heavy tails).
 
     Expects shape (N, 2) where col 0 is viscosity (%), col 1 is EOT (A/cm).
+    Oxidation is passed through (already near-Gaussian).
     """
     y = y.astype(np.float32).copy()
-    y[:, 0] = np.sign(y[:, 0]) * np.log1p(np.abs(y[:, 0]))
+    y[:, 0] = np.arcsinh(y[:, 0] / _ASINH_SCALE)
     return y
 
 
 def target_inverse_transform(y: np.ndarray) -> np.ndarray:
     y = y.astype(np.float32).copy()
-    y[:, 0] = np.sign(y[:, 0]) * (np.expm1(np.abs(y[:, 0])))
+    y[:, 0] = np.sinh(y[:, 0]) * _ASINH_SCALE
     return y
