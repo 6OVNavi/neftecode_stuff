@@ -201,9 +201,9 @@ def train_fold(
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
-    # Per-target loss weight; oxidation contributes more to the normalized LB
-    # metric (smaller std), so upweight it.
-    loss_weights = torch.tensor([1.0, 1.5], device=device)
+    # Per-target loss weight; experimented with upweighting oxidation, but that
+    # hurt viscosity more than it helped. Keep equal weights.
+    loss_weights = torch.tensor([1.0, 1.0], device=device)
 
     # SWA: maintain a running average of the top-K best-by-val checkpoints.
     swa_k = 8
