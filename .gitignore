@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+/tmp/
+*.log
+/artifacts_tmp/
+submission.zip
+predictions_raw_headers.csv
