@@ -129,27 +129,39 @@ def collate(batch, pad_n=None):
     return out
 
 
-def component_dropout(batch: dict, p: float):
-    """Randomly remove each non-pad component with prob p (but never drop below 3)."""
-    if p <= 0:
-        return batch
+def component_dropout(batch: dict, p: float, mass_aug: float = 0.0):
+    """Randomly remove each non-pad component with prob p (but never drop below 3).
+
+    If mass_aug > 0, also apply Dirichlet perturbation of remaining masses:
+    new_mass ~ Dirichlet(mass * mass_aug_concentration) * sum_of_original_mass.
+    Low concentration => high noise; high concentration => near-original.
+    """
     mass = batch["mass"]
     pad_mask = batch["pad_mask"]
     B, N = mass.shape
-    drop = torch.rand(B, N, device=mass.device) < p
-    # Count active per row and ensure at least 3 remain.
-    active = (~pad_mask).float()
-    new_pad = pad_mask | drop
-    remain = (~new_pad).float().sum(dim=1)
-    # For rows where remain < 3, undo the drop for those rows.
-    bad = remain < 3
-    new_pad[bad] = pad_mask[bad]
+    new_pad = pad_mask.clone()
+    if p > 0:
+        drop = torch.rand(B, N, device=mass.device) < p
+        new_pad = pad_mask | drop
+        remain = (~new_pad).float().sum(dim=1)
+        bad = remain < 3
+        new_pad[bad] = pad_mask[bad]
     new_mass = mass.masked_fill(new_pad, 0.0)
-    # Renormalize mass so it still sums to ~1 over remaining components.
+    # Dirichlet perturbation on non-pad masses.
+    if mass_aug > 0:
+        # Scale mass by a Gamma-distributed factor (equivalent to Dirichlet when renormalized).
+        concentration = 5.0 / max(mass_aug, 1e-3)  # lower mass_aug => higher concentration
+        gamma = torch.distributions.Gamma(
+            torch.tensor(concentration, device=new_mass.device),
+            torch.tensor(1.0, device=new_mass.device),
+        )
+        noise = gamma.sample(new_mass.shape)
+        new_mass = new_mass * noise
+        new_mass = new_mass.masked_fill(new_pad, 0.0)
+    # Renormalize to sum=1 over remaining components.
     s = new_mass.sum(dim=1, keepdim=True).clamp_min(1e-6)
     new_mass = new_mass / s
-    batch = {**batch, "pad_mask": new_pad, "mass": new_mass}
-    return batch
+    return {**batch, "pad_mask": new_pad, "mass": new_mass}
 
 
 def train_fold(
@@ -174,6 +186,7 @@ def train_fold(
     dropout: float = 0.1,
     id_dropout: float = 0.25,
     comp_dropout: float = 0.15,
+    mass_aug: float = 0.0,
     seed: int = 0,
     verbose: bool = True,
 ):
@@ -226,7 +239,8 @@ def train_fold(
         n_batches = 0
         for batch in train_loader:
             batch = component_dropout({k: (v.to(device) if torch.is_tensor(v) else v)
-                                       for k, v in batch.items()}, p=comp_dropout)
+                                       for k, v in batch.items()},
+                                      p=comp_dropout, mass_aug=mass_aug)
             y = batch["target"]
             g = (batch["globals"] - g_mu) / g_sd
             pred = model(
@@ -384,6 +398,9 @@ def main():
                          " and are never put into the validation fold.")
     ap.add_argument("--pseudo_weight", type=float, default=0.5,
                     help="Weight applied to pseudo-labeled loss terms")
+    ap.add_argument("--mass_aug", type=float, default=0.0,
+                    help="Strength of Dirichlet-like mass perturbation in augmentation "
+                         "(0=off, ~0.3-0.8 typical). Applied every training step.")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -476,6 +493,7 @@ def main():
                 target_mu=target_mu, target_sd=target_sd,
                 epochs=args.epochs, batch_size=args.batch_size,
                 d_model=args.d_model, n_layers=args.n_layers,
+                mass_aug=args.mass_aug,
                 seed=seed,
             )
             print(f"  -> best val_mae (normalized transformed) = {best_val:.4f}")
