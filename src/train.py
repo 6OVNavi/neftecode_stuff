@@ -201,9 +201,17 @@ def train_fold(
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
+    # Per-target loss weight; oxidation contributes more to the normalized LB
+    # metric (smaller std), so upweight it.
+    loss_weights = torch.tensor([1.0, 1.5], device=device)
+
+    # SWA: maintain a running average of the top-K best-by-val checkpoints.
+    swa_k = 8
+    swa_bank: list[tuple[float, dict]] = []  # (val_mae, state_dict)
+
     best_val = float("inf")
     best_state = None
-    patience = 50
+    patience = 60
     patience_left = patience
     history = []
 
@@ -221,7 +229,8 @@ def train_fold(
                 batch["mass"], batch["is_new"], batch["conditions"], batch["pad_mask"],
                 global_feats=g,
             )
-            loss = F.smooth_l1_loss(pred, y)
+            err = F.smooth_l1_loss(pred, y, reduction="none")
+            loss = (err * loss_weights).mean()
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -248,9 +257,16 @@ def train_fold(
         val_mae = float(np.mean(np.abs(val_preds - val_targets)))
         history.append({"epoch": ep, "train_loss": total / max(n_batches, 1), "val_mae": val_mae})
 
+        # Maintain SWA bank: keep top-K state dicts by val_mae.
+        state_cpu = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        swa_bank.append((val_mae, state_cpu))
+        swa_bank.sort(key=lambda x: x[0])
+        if len(swa_bank) > swa_k:
+            swa_bank.pop()
+
         if val_mae < best_val:
             best_val = val_mae
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = state_cpu
             patience_left = patience
         else:
             patience_left -= 1
@@ -259,7 +275,38 @@ def train_fold(
         if verbose and ep % 25 == 0:
             print(f"    ep={ep:3d} train={total/max(n_batches,1):.4f} val_mae={val_mae:.4f} best={best_val:.4f}")
 
-    model.load_state_dict(best_state)
+    # Build SWA-averaged state from top-K bank.
+    swa_state = {k: torch.zeros_like(v) for k, v in swa_bank[0][1].items()}
+    for _, s in swa_bank:
+        for k, v in s.items():
+            swa_state[k] += v.float()
+    for k in swa_state:
+        swa_state[k] = (swa_state[k] / len(swa_bank)).to(swa_bank[0][1][k].dtype)
+
+    # Evaluate SWA on val to decide whether to use it.
+    model.load_state_dict(swa_state)
+    model.eval()
+    val_preds2, val_targets2 = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch_t = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+            g = (batch_t["globals"] - g_mu) / g_sd
+            pred = model(
+                batch_t["comp_ids"], batch_t["type_ids"], batch_t["props"], batch_t["miss"],
+                batch_t["mass"], batch_t["is_new"], batch_t["conditions"], batch_t["pad_mask"],
+                global_feats=g,
+            )
+            val_preds2.append(pred.cpu().numpy())
+            val_targets2.append(batch_t["target"].cpu().numpy())
+    swa_mae = float(np.mean(np.abs(np.concatenate(val_preds2) - np.concatenate(val_targets2))))
+    if swa_mae <= best_val:
+        if verbose:
+            print(f"    [SWA] {swa_mae:.4f} <= best {best_val:.4f}, using SWA")
+        best_val = swa_mae
+    else:
+        if verbose:
+            print(f"    [SWA] {swa_mae:.4f} > best {best_val:.4f}, keeping best")
+        model.load_state_dict(best_state)
     return model, best_val, history
 
 

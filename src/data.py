@@ -402,21 +402,25 @@ def build_vocabs(mix_train: pd.DataFrame, mix_test: pd.DataFrame) -> tuple[dict,
     return comp_vocab, type_vocab
 
 
-_ASINH_SCALE = 10.0  # scale factor before asinh so small values stay linear-ish
+_ASINH_SCALE_VISC = 10.0  # scale factor before asinh for viscosity
+_ASINH_SCALE_OX = 20.0    # smaller scale since ox range is ~5-150
 
 
 def target_transform(y: np.ndarray) -> np.ndarray:
-    """asinh transform for viscosity (symmetric, smooth for heavy tails).
+    """asinh transform for both targets (symmetric, smooth for heavy tails).
 
-    Expects shape (N, 2) where col 0 is viscosity (%), col 1 is EOT (A/cm).
-    Oxidation is passed through (already near-Gaussian).
+    Expects shape (N, 2): col 0 viscosity (%), col 1 EOT (A/cm).
+    Both are asinh-scaled; ox has a different scale to preserve resolution.
     """
     y = y.astype(np.float32).copy()
-    y[:, 0] = np.arcsinh(y[:, 0] / _ASINH_SCALE)
+    y[:, 0] = np.arcsinh(y[:, 0] / _ASINH_SCALE_VISC)
+    y[:, 1] = np.arcsinh(y[:, 1] / _ASINH_SCALE_OX)
     return y
 
 
 def target_inverse_transform(y: np.ndarray) -> np.ndarray:
     y = y.astype(np.float32).copy()
-    y[:, 0] = np.sinh(y[:, 0]) * _ASINH_SCALE
+    y[:, 0] = np.sinh(y[:, 0]) * _ASINH_SCALE_VISC
+    # Oxidation must be non-negative physically.
+    y[:, 1] = np.maximum(np.sinh(y[:, 1]) * _ASINH_SCALE_OX, 0.0)
     return y

@@ -108,6 +108,45 @@ class ComponentEncoder(nn.Module):
         return self.ln(comp_vec + type_vec + prop_vec)
 
 
+class TypePairwise(nn.Module):
+    """Type-level bilinear interaction module (MCM-UNIQUAC style).
+
+    Scenario feature: sum_{i,j} w_i w_j A[type_i, type_j, k] across k interaction
+    channels. Captures explicit type-type synergy/antagonism (Mo-ZDDP, phenolic-
+    aminic AO, etc.) with very few parameters.
+    """
+
+    def __init__(self, n_types: int, n_channels: int = 8):
+        super().__init__()
+        # Symmetric init via sum of two random matrices / 2.
+        W = torch.randn(n_types, n_types, n_channels) * 0.02
+        W = 0.5 * (W + W.transpose(0, 1))
+        self.weight = nn.Parameter(W)
+
+    def forward(self, type_ids: torch.Tensor, mass: torch.Tensor,
+                pad_mask: torch.Tensor) -> torch.Tensor:
+        """type_ids: (B,N) int, mass: (B,N) float, pad_mask: (B,N) bool (True=pad).
+
+        Returns (B, n_channels) scenario-level pair features.
+        """
+        # Lookup per-component type vectors for each pair dimension.
+        # We need sum_{i,j} w_i w_j A[t_i, t_j, k]
+        # = sum_i sum_j (w_i [type_i==t] W[t,s,k] [type_j==s] w_j)
+        # Equivalent: one-hot types * W contraction.
+        B, N = type_ids.shape
+        T, _, K = self.weight.shape
+        # (B, N, T) one-hot-ish with mass; zero on pad.
+        mass_safe = mass.masked_fill(pad_mask, 0.0)
+        oh = torch.zeros(B, N, T, device=type_ids.device, dtype=mass.dtype)
+        oh.scatter_(2, type_ids.unsqueeze(-1), mass_safe.unsqueeze(-1))
+        # Mass-per-type: (B, T) = sum_i w_i [type_i == t]
+        mpt = oh.sum(dim=1)
+        # Bilinear: out_k = mpt^T W[:,:,k] mpt  ->  (B, K)
+        # einsum "bt, tsk, bs -> bk"
+        out = torch.einsum("bt,tsk,bs->bk", mpt, self.weight, mpt)
+        return out
+
+
 class LubriSet(nn.Module):
     def __init__(
         self,
@@ -116,6 +155,7 @@ class LubriSet(nn.Module):
         n_props: int,
         condition_dim: int,
         global_dim: int = 0,
+        pair_channels: int = 8,
         d_model: int = 128,
         n_heads: int = 4,
         n_layers: int = 3,
@@ -146,8 +186,11 @@ class LubriSet(nn.Module):
         )
         # One seed per target.
         self.pma = PMA(d_model, n_heads, k=n_targets, dropout=dropout)
-        # Head receives pooled vector + raw global features concatenated.
-        head_in = d_model + global_dim
+        # Type-pairwise interaction module.
+        self.pair_channels = pair_channels
+        self.type_pairwise = TypePairwise(n_types=n_types, n_channels=pair_channels)
+        # Head receives pooled vector + raw global features + pair features.
+        head_in = d_model + global_dim + pair_channels
         self.heads = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(head_in, d_model),
@@ -180,7 +223,12 @@ class LubriSet(nn.Module):
         for layer in self.layers:
             x = layer(x, full_mask)
         pooled = self.pma(x, full_mask)  # (B, n_targets, D)
+        # Compute pairwise type features (same for all target heads).
+        pair_feat = self.type_pairwise(type_ids, mass, pad_mask)  # (B, K)
+        extras = [pair_feat]
         if self.global_dim > 0 and global_feats is not None:
-            pooled = torch.cat([pooled, global_feats.unsqueeze(1).expand(-1, self.n_targets, -1)], dim=-1)
+            extras.insert(0, global_feats)
+        extra_cat = torch.cat(extras, dim=-1)  # (B, E)
+        pooled = torch.cat([pooled, extra_cat.unsqueeze(1).expand(-1, self.n_targets, -1)], dim=-1)
         outs = [self.heads[i](pooled[:, i]).squeeze(-1) for i in range(self.n_targets)]
         return torch.stack(outs, dim=-1)
