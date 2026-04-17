@@ -32,6 +32,7 @@ from .data import (
     target_transform,
     target_inverse_transform,
 )
+
 from .model import LubriSet
 
 
@@ -63,6 +64,7 @@ class SetDataset(Dataset):
             "is_new": s.is_new,
             "conditions": s.conditions,
             "globals": s.globals,
+            "weight": float(s.weight),
         }
         if s.targets is not None:
             y_t = target_transform(s.targets[None, :])[0]
@@ -87,6 +89,7 @@ def collate(batch, pad_n=None):
     is_new = np.zeros((B, max_n), dtype=np.float32)
     conditions = np.zeros((B, batch[0]["conditions"].shape[0]), dtype=np.float32)
     globals_ = np.zeros((B, batch[0]["globals"].shape[0]), dtype=np.float32)
+    weights = np.ones((B,), dtype=np.float32)
     pad_mask = np.ones((B, max_n), dtype=bool)  # True = pad
     has_target = "target" in batch[0]
     if has_target:
@@ -103,6 +106,7 @@ def collate(batch, pad_n=None):
         is_new[i, :n] = b["is_new"]
         conditions[i] = b["conditions"]
         globals_[i] = b["globals"]
+        weights[i] = b.get("weight", 1.0)
         pad_mask[i, :n] = False
         scen_ids.append(b["scenario_id"])
         if has_target:
@@ -116,6 +120,7 @@ def collate(batch, pad_n=None):
         "is_new": torch.from_numpy(is_new),
         "conditions": torch.from_numpy(conditions),
         "globals": torch.from_numpy(globals_),
+        "weight": torch.from_numpy(weights),
         "pad_mask": torch.from_numpy(pad_mask),
         "scenario_id": scen_ids,
     }
@@ -230,7 +235,9 @@ def train_fold(
                 global_feats=g,
             )
             err = F.smooth_l1_loss(pred, y, reduction="none")
-            loss = (err * loss_weights).mean()
+            # Per-sample weight (1.0 for real train, <1 for pseudo-labels).
+            sw = batch["weight"].unsqueeze(-1)
+            loss = (err * loss_weights * sw).sum() / (sw.sum() * 2 + 1e-9)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -370,6 +377,13 @@ def main():
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--n_layers", type=int, default=3)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--pseudo_csv", default=None,
+                    help="Path to a CSV with pseudo-labeled test scenarios (same"
+                         " format as predictions.csv). These are added to the"
+                         " training pool with sample_weight (see --pseudo_weight)"
+                         " and are never put into the validation fold.")
+    ap.add_argument("--pseudo_weight", type=float, default=0.5,
+                    help="Weight applied to pseudo-labeled loss terms")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -391,6 +405,31 @@ def main():
         mix_test, wide_batch, wide_comp, mu, sd, comp_vocab, type_vocab,
         train_comp_set=train_comp_set, is_train=False,
     )
+
+    pseudo_samples: list = []
+    if args.pseudo_csv:
+        import numpy as _np
+        pc = pd.read_csv(args.pseudo_csv)
+        # Normalize column names: tolerate both 'scenario_id' + long target names,
+        # or any 3-col csv where col1/2 are target_viscosity/target_oxidation.
+        pc = pc.rename(columns={pc.columns[1]: "target_viscosity",
+                                pc.columns[2]: "target_oxidation"})
+        by_id = {r["scenario_id"]: (r["target_viscosity"], r["target_oxidation"])
+                 for _, r in pc.iterrows()}
+        for ts in test_samples:
+            if ts.scenario_id not in by_id:
+                continue
+            y1, y2 = by_id[ts.scenario_id]
+            ps = ScenarioSample(
+                scenario_id=ts.scenario_id, comp_ids=ts.comp_ids, type_ids=ts.type_ids,
+                props=ts.props, miss_mask=ts.miss_mask, mass=ts.mass,
+                conditions=ts.conditions, is_new=ts.is_new, globals=ts.globals,
+                targets=_np.array([y1, y2], dtype=_np.float32),
+                weight=float(args.pseudo_weight),
+            )
+            pseudo_samples.append(ps)
+        print(f"Loaded {len(pseudo_samples)} pseudo-labeled test scenarios "
+              f"(weight={args.pseudo_weight})")
 
     # Target standardization based on whole train (in transformed space).
     y_raw = np.stack([s.targets for s in train_samples_all], axis=0)
@@ -424,6 +463,9 @@ def main():
     for fold_idx, (tr_idx, va_idx) in enumerate(kf.split(scenarios)):
         tr_samples = [train_samples_all[i] for i in tr_idx]
         va_samples = [train_samples_all[i] for i in va_idx]
+        # Pseudo-labeled test scenarios: always in the training pool, never in val.
+        if pseudo_samples:
+            tr_samples = tr_samples + pseudo_samples
         for seed in range(args.n_seeds):
             print(f"\n[Fold {fold_idx+1}/{args.n_folds}, seed {seed}]")
             model, best_val, hist = train_fold(

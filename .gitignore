@@ -4,5 +4,8 @@ __pycache__/
 /tmp/
 *.log
 /artifacts_tmp/
-submission.zip
-predictions_raw_headers.csv
+# ignore csv outputs (keep only zips)
+/predictions.csv
+/predictions_raw_headers.csv
+/submission_*.csv
+/blend_weights.json

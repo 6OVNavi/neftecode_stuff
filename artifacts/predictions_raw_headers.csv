@@ -1,4 +1,4 @@
-scenario_id,target_viscosity,target_oxidation
+scenario_id,"Delta Kin. Viscosity KV100 - relative | - Daimler Oxidation Test (DOT), %","Oxidation EOT | DIN 51453 Daimler Oxidation Test (DOT), A/cm"
 test_1,-24.797707,19.005573
 test_2,-23.311602,16.538563
 test_3,-23.761213,18.6511

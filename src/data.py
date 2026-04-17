@@ -225,6 +225,7 @@ class ScenarioSample:
     is_new: np.ndarray         # (n,) 1 if component not in train vocab
     globals: np.ndarray        # (GLOBAL_FEAT_DIM,) physics aggregates + type flags + synergy
     targets: np.ndarray | None # (2,) target_viscosity, target_oxidation (train only)
+    weight: float = 1.0        # per-sample loss weight (0.5 for pseudo-labels)
 
 
 def compute_global_features(type_ids: np.ndarray, props_raw: np.ndarray,
