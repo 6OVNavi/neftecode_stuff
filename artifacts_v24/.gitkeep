@@ -1,0 +1,5 @@
+# v24: Caruana 3-way blend artifacts_v16+v20+v22.
+# Caruana put w_v16=0.947, w_v20=0.053, w_v22=0.000, so blend ~= v16.
+# OOF-optimal blending collapses here because v16 has best OOF, but on LB v20
+# is actually stronger (0.0964 vs ~0.0977). Several manual-weight variants
+# packaged separately as submission_v24_*.zip.

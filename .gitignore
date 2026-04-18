@@ -14,3 +14,9 @@ __pycache__/
 !/artifacts_v22/.gitkeep
 /artifacts_v23/*
 !/artifacts_v23/.gitkeep
+/artifacts_v24/*
+!/artifacts_v24/.gitkeep
+/artifacts_v24_mean/
+/artifacts_v24_lb/
+/artifacts_v24_diverse/
+/artifacts_v24b/
