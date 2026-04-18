@@ -1,53 +1,59 @@
-# LubriSet — Нефтекод 2026 ночная сводка
+# LubriSet — Нефтекод 2026 ночная сводка (финальная)
 
-## Текущий best OOF: **0.1904** (v16), линейный прогноз LB ~0.0858
-
-## Что сделано
+## Recap
 
 | Версия | OOF норма | LB факт | Что внутри |
 |---|---|---|---|
-| v2 | 0.232 | 0.0992 | Set Transformer + 61 prop + asinh |
-| v5 (v2v+v4o) | 0.226 | 0.0978 | target-specialized |
-| v9 | 0.215 | 0.0971 | v2 + pseudo v5 (1 round) |
-| v12_simple | — | **0.0968** | v9v + v11o cross |
-| v13 | 0.203 | — | + MCM latents + pseudo v9 |
-| v16 | **0.1904** | — | MCM + pseudo v12_simple |
-| v18 | 0.197 | — | iterative round 3 (pseudo v16) |
-| v19 (v16+v18) | 0.191 | — | safe blend |
-| v19_4blend | 0.189 (OOF) | — | агрессивный OOF-блeнд |
+| v9 | 0.2151 | 0.0971 | Set Transformer + pseudo v5 (baseline) |
+| v12_simple | — | **0.0968** | v9v + v11o cross (best LB проверенный) |
+| v13 | 0.2032 | — | + MCM SVD+NMF latents + pseudo v9 |
+| **v16** | **0.1904** | — | MCM + pseudo от **v12_simple** (best LB source) |
+| v18 | 0.1969 | — | iterative round 3 (pseudo от v16) |
+| v20 | 0.1976 | — | 30-model diverse-config ensemble |
+| v21 blend 0.4v16+0.3v18+0.3v20 | 0.1919 | — | simple safe blend |
 
-## Главный вывод
+## Принципы, подтверждённые ночью
 
-**v16 — ПИК одиночной модели. Blend не улучшает существенно** (nested CV показывает что блендинг ≈ v16 alone из-за overfit'а OOF-весов на 167 примерах).
+1. **MCM-фичи = killer** — matrix decomposition (SVD+NMF) сценарий × компонент как доп-фичи → single biggest gain ночи (v9 → v13 -5.5%).
+2. **Качество pseudo-labels матчит source** — pseudo от v12_simple (LB 0.0968) > pseudo от v9 (LB 0.0971).
+3. **Iterative pseudo-labeling плато на round 3** — v18 чуть хуже v16.
+4. **Diverse hyperparams (v20) не бьёт sota-single** — слабые configs (d_model=96, aggressive dropout) тянут ансамбль вниз.
+5. **OOF stacking переобучается на 167 примерах** — nested CV показывает 0.1966 при full-grid 0.1892.
 
-## Что отправлять (в порядке приоритета)
+## Архивы — что отправлять (приоритет от надёжности)
 
-1. **`submission.zip`** (= v16) — безопасный, лучший OOF на одной модели
-2. `submission_v19_v16v18mean.zip` — safe blend v16+v18, tiny diff
-3. `submission_v13.zip` — проверить вклад MCM vs v9
-4. `submission_v19_4blend.zip` — risk-on: OOF-оптимальный 4-блeнд
+1. **`submission.zip` = v16** — best honest single (OOF 0.1904)
+2. `submission_v16.zip` — то же, для уверенности
+3. `submission_v21_blend.zip` — 0.4·v16 + 0.3·v18 + 0.3·v20 (небольшое усреднение)
+4. `submission_v19_v16v18mean.zip` — 50/50 v16+v18 (более консервативное)
+5. `submission_v20_diverse.zip` — 30 диверсных моделей, mean
+6. `submission_v13.zip` — v13 alone (для сравнения)
 
-## Что еще в процессе
+Если LB подтвердит, что v16 ≈ 0.088-0.090:
+- Отправь **v16** как основной
+- Затем **v21_blend** чтобы проверить, улучшает ли минимальное усреднение
 
-- **v20** (`artifacts_v20/`): diverse 30-model ensemble (5 folds × 6 различных configs). Если дообучится — будет `submission_v20.zip`.
-- TabPFN: **не заработал** — proxy блокирует api.priorlabs.ai и HF.
+Если LB v16 хуже ожиданий (>0.092):
+- **MCM переобучается** → откатываемся на v9+v5 линию
+- Тогда v12_simple (0.0968) остаётся best safe
 
-## Ключевые находки ночи
+## Факты, которые НЕ получилось
 
-1. **MCM-latents** (матричная декомпозиция scenario × component → SVD+NMF фичи сценария) дали прорыв: v9 → v13 **−5.5% OOF** одной фичей.
-2. **Pseudo-labels от BEST-LB модели** (v12_simple) > pseudo-labels от v9. Важно, чей сигнал ретранслируешь.
-3. **Iterative pseudo-labels** работают 1 раз (v9→v13→v16), но 3-й round (v16→v18) дал диминишинг.
-4. **Blend overfit**: грид-сёрч OOF-весов показывает 0.189, nested CV показывает 0.197. Реалия честно ≈ v16 alone.
-5. **TabPFN v2 требует выход в сеть** — в sandbox заблокирован (api.priorlabs.ai: 403, huggingface: 403).
+1. **TabPFN v2** — заблокирован сетью в sandbox (api.priorlabs.ai → 403, huggingface.co → 403). Токен принят кодом, но верификация через API невозможна.
+2. **FT-Transformer full train** — слишком медленно на 2 thread CPU в параллель с v13. Код готов в `src/ft_transformer.py`, можно запустить отдельно.
+3. **Boosting TabPFN** — зависит от TabPFN, не удалось.
 
-## Куда дальше если LB подтвердит
+## Структура архивов
 
-Если v16 даст LB ~0.088-0.090 (top-10):
-- ensemble с v13 + v18 для страховки  
-- 2 round pseudo-label cycle с последним LB лидером
-- v20 diverse ensemble (в процессе)
-
-Если v16 даст LB хуже ожиданий (>0.093):
-- overfit на MCM → откатиться на v9+v5 линию
-- попробовать чистый FT-Transformer от scratch
-- decrypt-API аугментация от организаторов (добавить literature data в train)
+```
+artifacts/             — v11 (Set Transformer + mass_aug + pseudo_v9)
+artifacts_v13/         — v13 (+ MCM + pseudo_v9)
+artifacts_v16/         — v16 (+ MCM + pseudo_v12simple) ← BEST
+artifacts_v18/         — v18 (iterative round 3)
+artifacts_v20/         — v20 (diverse 30-model ensemble)
+src/mcm_features.py    — matrix decomposition code (SVD+NMF)
+src/augment_globals.py — attach MCM to scenario globals
+src/tabular*.py        — 142-feat rich tabular code
+src/ft_transformer.py  — FT-Transformer (не дообучен)
+src/train_diverse.py   — training with varied hyperparameters
+```
