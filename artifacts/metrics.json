@@ -1,7 +1,7 @@
 {
-  "n_models": 15,
+  "n_models": 20,
   "n_folds": 5,
-  "n_seeds": 3,
-  "oof_mae_visc": 26.222009706610216,
-  "oof_mae_ox": 10.684052425468277
+  "n_seeds": 4,
+  "oof_mae_visc": 29.17111303108538,
+  "oof_mae_ox": 10.284827357994581
 }
