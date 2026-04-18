@@ -9,3 +9,6 @@ __pycache__/
 /predictions_raw_headers.csv
 /submission_*.csv
 /blend_weights.json
+# in-flight training dirs — contents generated, only .gitkeep tracked
+/artifacts_v22/*
+!/artifacts_v22/.gitkeep

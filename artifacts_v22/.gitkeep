@@ -1,0 +1,3 @@
+# Artifacts directory for v22 training.
+# Checkpoints are generated during training and gitignored to keep repo size manageable.
+# Final predictions will be packaged into submission archives and committed.
