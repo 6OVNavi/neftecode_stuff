@@ -1,0 +1,3 @@
+# v23: Caruana-weighted blend of v16/v18/v20 OOF predictions.
+# Result: w_v16=0.95, w_v20=0.05; near-identical to v16 alone.
+# LOO isotonic calibration tested and rejected (overfit on n=167).

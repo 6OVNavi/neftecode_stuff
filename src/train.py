@@ -190,6 +190,7 @@ def train_fold(
     mass_aug: float = 0.0,
     seed: int = 0,
     verbose: bool = True,
+    init_state_dict: dict | None = None,
 ):
     set_seed(seed)
     train_ds = SetDataset(train_samples, target_mu, target_sd)
@@ -214,6 +215,10 @@ def train_fold(
         dropout=dropout,
         id_dropout=id_dropout,
     ).to(device)
+    if init_state_dict is not None:
+        # Warm-start from a pretrained checkpoint (e.g. synthetic pretrain).
+        # strict=False lets us swap heads or add tokens later without breakage.
+        model.load_state_dict(init_state_dict, strict=False)
     g_mu = torch.from_numpy(global_mu).to(device)
     g_sd = torch.from_numpy(global_sd).to(device)
 

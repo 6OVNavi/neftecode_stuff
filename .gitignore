@@ -12,3 +12,5 @@ __pycache__/
 # in-flight training dirs — contents generated, only .gitkeep tracked
 /artifacts_v22/*
 !/artifacts_v22/.gitkeep
+/artifacts_v23/*
+!/artifacts_v23/.gitkeep
