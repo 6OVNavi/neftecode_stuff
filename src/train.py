@@ -191,6 +191,7 @@ def train_fold(
     seed: int = 0,
     verbose: bool = True,
     init_state_dict: dict | None = None,
+    model_cls: type = None,
 ):
     set_seed(seed)
     train_ds = SetDataset(train_samples, target_mu, target_sd)
@@ -202,7 +203,8 @@ def train_fold(
         val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate, drop_last=False
     )
 
-    model = LubriSet(
+    model_class = model_cls or LubriSet
+    model = model_class(
         n_components=n_components,
         n_types=n_types,
         n_props=n_props,
