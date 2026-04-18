@@ -23,6 +23,7 @@ from .data import (
     build_vocabs, load_properties, target_transform, target_inverse_transform,
 )
 from .tabular import build_tabular
+from .tabular_rich import build_tabular_rich
 
 
 class FeatureTokenizer(nn.Module):
@@ -66,7 +67,7 @@ class FTTransformer(nn.Module):
         return out
 
 
-def build_data():
+def build_data(rich: bool = True):
     mix_train = pd.read_csv("daimler_mixtures_train.csv")
     mix_test = pd.read_csv("daimler_mixtures_test.csv")
     pr = load_properties("daimler_component_properties.csv")
@@ -78,8 +79,13 @@ def build_data():
     te_s = build_scenario_samples(mix_test, wb, wc, mu, sd, cv, tv,
                                   train_comp_set=set(mix_train[COL_COMP].unique()),
                                   is_train=False)
-    Xtr, names, ytr, ids_tr = build_tabular(tr_s)
-    Xte, _, _, ids_te = build_tabular(te_s)
+    if rich:
+        y_tr = np.stack([s.targets for s in tr_s])
+        Xtr, names, ytr, ids_tr = build_tabular_rich(tr_s, mix_train, mix_test, y_tr)
+        Xte, _, _, ids_te = build_tabular_rich(te_s, mix_train, mix_test, y_tr)
+    else:
+        Xtr, names, ytr, ids_tr = build_tabular(tr_s)
+        Xte, _, _, ids_te = build_tabular(te_s)
     return Xtr, ytr, ids_tr, Xte, ids_te, names
 
 

@@ -171,6 +171,7 @@ def train_fold(
     n_types,
     n_props,
     condition_dim,
+    global_dim_actual,
     global_mu,
     global_sd,
     device,
@@ -205,7 +206,7 @@ def train_fold(
         n_types=n_types,
         n_props=n_props,
         condition_dim=condition_dim,
-        global_dim=GLOBAL_FEAT_DIM,
+        global_dim=global_dim_actual,
         d_model=d_model,
         n_heads=n_heads,
         n_layers=n_layers,
@@ -401,6 +402,10 @@ def main():
     ap.add_argument("--mass_aug", type=float, default=0.0,
                     help="Strength of Dirichlet-like mass perturbation in augmentation "
                          "(0=off, ~0.3-0.8 typical). Applied every training step.")
+    ap.add_argument("--mcm", action="store_true",
+                    help="Attach MCM-style scenario latent features to globals.")
+    ap.add_argument("--mcm_svd", type=int, default=12)
+    ap.add_argument("--mcm_nmf", type=int, default=8)
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -422,6 +427,16 @@ def main():
         mix_test, wide_batch, wide_comp, mu, sd, comp_vocab, type_vocab,
         train_comp_set=train_comp_set, is_train=False,
     )
+
+    # Optional MCM scenario-level latent features appended to globals.
+    if args.mcm:
+        import numpy as _np
+        y_tr = _np.stack([s.targets for s in train_samples_all], axis=0)
+        from .augment_globals import attach_mcm_globals
+        K = attach_mcm_globals(train_samples_all, test_samples,
+                               mix_train, mix_test, y_tr,
+                               n_latent_svd=args.mcm_svd, n_latent_nmf=args.mcm_nmf)
+        print(f"Attached MCM features: +{K} dims per scenario global vector")
 
     pseudo_samples: list = []
     if args.pseudo_csv:
@@ -457,6 +472,7 @@ def main():
 
     # Global feature normalization (fit on train only).
     G = np.stack([s.globals for s in train_samples_all], axis=0)
+    global_dim_actual = int(G.shape[1])
     global_mu = G.mean(axis=0).astype(np.float32)
     global_sd = (G.std(axis=0) + 1e-6).astype(np.float32)
     print(f"Global features: dim={G.shape[1]}")
@@ -489,6 +505,7 @@ def main():
                 tr_samples, va_samples,
                 n_components=n_components, n_types=n_types, n_props=n_props,
                 condition_dim=CONDITION_DIM,
+                global_dim_actual=global_dim_actual,
                 global_mu=global_mu, global_sd=global_sd, device=device,
                 target_mu=target_mu, target_sd=target_sd,
                 epochs=args.epochs, batch_size=args.batch_size,
@@ -522,7 +539,7 @@ def main():
                      "d_model": args.d_model, "n_layers": args.n_layers,
                      "n_components": n_components, "n_types": n_types, "n_props": n_props,
                      "condition_dim": CONDITION_DIM,
-                     "global_dim": GLOBAL_FEAT_DIM,
+                     "global_dim": global_dim_actual,
                  }},
                 out_dir / f"model_fold{fold_idx}_seed{seed}.pt",
             )
